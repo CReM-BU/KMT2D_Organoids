@@ -1,0 +1,438 @@
+---
+title: "Analysis 10X multiome using WNN"
+output:
+  html_document:
+    fig_caption: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: cerulean
+editor_options:
+  chunk_output_type: console
+params:
+#  prefix: "19235RX4"
+  resDEG: "SCT_snn_res.0.25"
+  percent.mito: 15
+  cell.source: "human"
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+library(future)
+#plan("multiprocess", workers = 2)
+options(future.globals.maxSize = 8000 * 1024^2)
+
+ifelse(dir.exists("/mnt/scc/project_workspace/"),
+       cremwd <- "/mnt/scc/",
+       cremwd <- "/restricted/projectnb/crem-bioinfo/")
+master_path <- file.path(cremwd,"/project_workspace/22_05_13_angie/calculation/analysis/day74/")
+prefix <- "ATAC_RNA_WNN_CombinigPeaks_2"
+calculations_path <- paste0(master_path, prefix, "/")
+plots_path <- file.path(calculations_path, "plots/")
+rds_path <- file.path(calculations_path, "rds/")
+cache_path <- file.path(calculations_path, "cache/") # it must end in a slash
+dir.create(rds_path, recursive = T)
+dir.create(plots_path, recursive = T)
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE,error = FALSE,warning = FALSE, cache = TRUE, cache.path = cache_path, fig.width=9,fig.height=7, autodep=TRUE,
+collapse = FALSE, fig.path = plots_path, fig.keep = "all", comment = "##", dev =
+c("png", "pdf"), cache.lazy = FALSE)
+options(tibble.print_max = 150)
+
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(matrixStats) #rowVars
+library(magrittr)
+library(dplyr)
+library(RColorBrewer)
+library(kableExtra)
+library(data.table) # getting counts
+library(knitr)
+library(clustree)   # overview of clusters at different resolutions
+library(patchwork)  # method for combining plots
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggplot2)
+library(patchwork)
+library(hdf5r)
+#library(GenomicRanges)
+```
+
+Note that any mention of "KO" refers to the KMT2D-LOF samples. 
+
+```{r load_objects, eval=FALSE}
+sc <- readRDS(paste0(rds_path, "sc_ko.Rds"))
+```
+
+# QC metrics and filtering
+
+```{r createCombinePeaks, eval=TRUE}
+# Read in counts from STARsolo
+p <- list()
+sample.names <- c('19235RX1','19235RX2','19235RX3','19235RX4')
+
+for (i in 1:length(sample.names)) {
+  prefix <- sample.names[i]
+  # the 10x hdf5 file contains both data types.
+  peaks <- read.table(
+  file = paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger/",prefix,"/outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end"))
+  gr <- makeGRangesFromDataFrame(peaks)
+  p[[i]] <- gr
+}
+
+q <- list()
+sample.names <- c('19311R_X1','19311R_X2','19311R_X3','19311R_X4')
+
+for (i in 1:length(sample.names)) {
+  prefix <- sample.names[i]
+  # the 10x hdf5 file contains both data types.
+  peaks <- read.table(
+  file = paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger_74days/",prefix,"/outs/atac_peaks.bed"),
+  col.names = c("chr", "start", "end"))
+  gr <- makeGRangesFromDataFrame(peaks)
+  q[[i]] <- gr
+}
+
+combined.peaks <- reduce(c(p[[1]],p[[2]],p[[3]],p[[4]],q[[1]],q[[2]],q[[3]],q[[4]]))
+peakwidths <- width(combined.peaks)
+combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+combined.peaks                         
+```                         
+
+```{r readCountsDay51}
+seu.list <- list()
+sample.names <- c('19235RX1','19235RX2','19235RX3','19235RX4')
+
+for (i in 1:length(sample.names)) {
+  prefix <- sample.names[i]
+  
+  sc.counts <-  Read10X_h5(paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger/",prefix,"/outs/filtered_feature_bc_matrix.h5"))
+  
+# extract RNA and ATAC data
+  rna_counts <- sc.counts$`Gene Expression`
+  #atac_counts <- sc.counts$Peaks
+
+# Create Seurat object
+  sc.pre <- CreateSeuratObject(counts = rna_counts)
+  sc.pre[["percent.mt"]] <- PercentageFeatureSet(sc.pre, pattern = "^MT-")
+  
+  cell=Cells(sc.pre)
+  
+  frags<- CreateFragmentObject(path = paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger/",prefix,"/outs/atac_fragments.tsv.gz"), cells = cell)
+  
+  atac_counts <- FeatureMatrix(fragments = frags,features = combined.peaks, cells = cell)
+  
+  grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+  grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+  atac_counts <- atac_counts[as.vector(grange.use), ]
+  annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+  seqlevelsStyle(annotations) <- 'UCSC'
+  genome(annotations) <- "hg38"
+  
+  chrom_assay <- CreateChromatinAssay(
+   counts = atac_counts,
+   sep = c(":", "-"),
+   genome = 'hg38',
+   fragments = frags,
+   annotation = annotations
+ )  
+
+sc.pre[["ATAC"]] <- chrom_assay
+  
+seu.list[[i]] <- sc.pre
+seu.list[[i]]$timepoint <- 'Day51'
+seu.list[[i]]$orig.ident <- sample.names[i]
+DefaultAssay(seu.list[[i]]) <- "RNA" # make default RNA, so that SCT can be removed
+
+}  
+
+sc.51 <- merge(seu.list[[1]], y = seu.list[-1], project = "sc")
+sc.51$genotype <- plyr::mapvalues(sc.51$orig.ident,c('19235RX1','19235RX2','19235RX3','19235RX4'), c('WT','WT','KO','KO'))
+sc.51$sample <- plyr::mapvalues(sc.51$orig.ident,c('19235RX1','19235RX2','19235RX3','19235RX4'), c('WT1_day51','WT2_day51','KO1_day51','KO2_day51'))
+
+VlnPlot(sc.51, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "nFeature_RNA"), ncol = 4,
+  log = TRUE, pt.size = 0.1) + NoLegend()
+ggsave(paste0(plots_path, "Vln.qc.sc51.pre.pdf"))
+
+saveRDS(sc.51, paste0(rds_path, "sc51.pre.multiome.Rds"))
+```
+
+```{r readCountsDay74}
+
+seu.list <- list()
+sample.names <- c('19311R_X1','19311R_X2','19311R_X3','19311R_X4')
+
+
+for (i in 1:length(sample.names)) {
+  prefix <- sample.names[i]
+  
+  sc.counts <-  Read10X_h5(paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger_74days/",prefix,"/outs/filtered_feature_bc_matrix.h5"))
+  
+# extract RNA and ATAC data
+  rna_counts <- sc.counts$`Gene Expression`
+  #atac_counts <- sc.counts$Peaks
+
+# Create Seurat object
+  sc.pre <- CreateSeuratObject(counts = rna_counts)
+  sc.pre[["percent.mt"]] <- PercentageFeatureSet(sc.pre, pattern = "^MT-")
+  
+  cell=Cells(sc.pre)
+  
+  frags<- CreateFragmentObject(path = paste0(cremwd, "/project_workspace/22_05_13_angie/calculation/cellranger_74days/",prefix,"/outs/atac_fragments.tsv.gz"), cells = cell)
+  
+  atac_counts <- FeatureMatrix(fragments = frags,features = combined.peaks, cells = cell)
+  
+  grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+  grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+  atac_counts <- atac_counts[as.vector(grange.use), ]
+  annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+  seqlevelsStyle(annotations) <- 'UCSC'
+  genome(annotations) <- "hg38"
+  
+  chrom_assay <- CreateChromatinAssay(
+   counts = atac_counts,
+   sep = c(":", "-"),
+   genome = 'hg38',
+   fragments = frags,
+   annotation = annotations
+ )  
+
+sc.pre[["ATAC"]] <- chrom_assay
+  
+seu.list[[i]] <- sc.pre
+seu.list[[i]]$timepoint <- 'Day74'
+seu.list[[i]]$orig.ident <- sample.names[i]
+DefaultAssay(seu.list[[i]]) <- "RNA" # make default RNA, so that SCT can be removed
+
+} 
+
+sc.74 <- merge(seu.list[[1]], y = seu.list[-1], project = "sc")
+sc.74$genotype <- plyr::mapvalues(sc.74$orig.ident,c('19311R_X1','19311R_X2','19311R_X3','19311R_X4'), c('WT','WT','KO','KO'))
+sc.74$sample <- plyr::mapvalues(sc.74$orig.ident,c('19311R_X1','19311R_X2','19311R_X3','19311R_X4'), c('WT1_day74','WT2_day74','KO1_day74','KO2_day74'))
+
+VlnPlot(sc.51, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "nFeature_RNA"), ncol = 4,
+  log = TRUE, pt.size = 0.1) + NoLegend()
+ggsave(paste0(plots_path, "Vln.qc.sc74.pre.pdf"))
+
+saveRDS(sc.74, paste0(rds_path, "sc74.pre.multiome.Rds"))
+
+sc.pre <- merge(sc.51,sc.74)
+
+VlnPlot(sc.pre, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "nFeature_RNA"), ncol = 4,
+  log = TRUE, pt.size = 0.1) + NoLegend()
+
+ggsave(paste0(plots_path, "Vln.qc.sc.pre.pdf"))
+
+saveRDS(sc.pre, paste0(rds_path, "sc.pre.multiome.Rds"))
+```
+
+```{r filter}
+sc <- subset(x = sc.pre,subset = percent.mt < 25 & nCount_RNA > 200)
+VlnPlot(sc, features = c("nCount_ATAC", "nCount_RNA", "percent.mt", "nFeature_RNA"), ncol = 4, log = TRUE, pt.size = 0.1) + NoLegend()
+ggsave(paste0(plots_path, "Vln.qc.sc.pdf"))
+```
+
+```{r dim_red_pca}
+
+# RNA analysis
+DefaultAssay(sc) <- "RNA"
+sc <- SCTransform(sc, verbose = FALSE)
+sc <- RunPCA(sc, verbose = F)
+ElbowPlot(sc, 50)
+ggsave(paste0(plots_path, "elbow.pdf"))
+DimHeatmap(sc, dims = 1:9, cells = 500, balanced = TRUE)
+ggsave(paste0(plots_path, "dimheatmap.pdf"))
+sc <- RunUMAP(sc, dims = 1:50, reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+p1 <- DimPlot(sc, reduction = "umap.rna", group.by = "genotype", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
+
+# ATAC analysis
+# We exclude the first dimension as this is typically correlated with sequencing depth
+DefaultAssay(sc) <- "ATAC"
+sc <- RunTFIDF(sc)
+sc <- FindTopFeatures(sc, min.cutoff = 'q0')
+sc <- RunSVD(sc)
+sc <- RunUMAP(sc, reduction = 'lsi', dims = 2:50, reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+
+Idents(sc) <- 'genotype'
+sc.k <- subset(sc, idents = 'KO')
+sc.w <- subset(sc, idents = 'WT')
+ 
+DimPlot(sc, reduction = "wnn.umap", group.by = "genotype", cols = c('#5AB4AC','gray')) # gray-WT #5AB4AC-KO
+ggsave(paste0(plots_path, "UMAP.wnn.pdf"), width = 8, height = 7)
+```
+
+
+```{r WNNgraph}
+sc <- FindMultiModalNeighbors(sc, reduction.list = list("pca", "lsi"), dims.list = list(1:50, 2:50))
+sc <- RunUMAP(sc, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+
+#p1 <- DimPlot(sc, reduction = "umap.rna", group.by = "genotype", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("RNA")
+#p2 <- DimPlot(sc, reduction = "umap.atac", group.by = "genotype", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("ATAC")
+p3 <- DimPlot(sc, reduction = "wnn.umap", group.by = "genotype", label = TRUE, label.size = 2.5, repel = TRUE) + ggtitle("WNN")
+
+p3
+
+ggsave(paste0(plots_path, "UMAP.WNN.pdf"), width = 8, height = 7)
+
+#sc <- FindClusters(sc, graph.name = "wsnn", algorithm = 3, verbose = FALSE)
+
+```
+
+
+```{r cluster_and_rdim, eval=TRUE, results=FALSE}
+sc <- FindNeighbors(sc, dims = 1:20)
+sc <- FindClusters(sc, graph.name = "wsnn", algorithm = 3, resolution = seq(1.5, 0.25, -0.25)) # reverse order, seurat_clusters takes last run's value
+sc <- FindClusters(sc, graph.name = "wsnn", algorithm = 3, resolution = seq(0.20, 0.05, -0.05)) # reverse order, seurat_clusters takes last run's value
+```
+
+# Molecular Signatures scoring
+
+Compute enrichment for molecular signatures using method from Tirosh et al, Science (2016)
+PMCID: PMC4944528
+
+```{r mol_signature}
+DefaultAssay(sc) <- "SCT"
+msig1 <- as.list(readxl::read_excel(paste0(cremwd, "/reference_data/gene_sets/Brain_Organoids_Markers_2022.xlsx"), sheet=1))
+msig1 <- lapply(msig1, function(x) x[!is.na(x)])
+names(msig1) <- sub("\\+", "pos", names(msig1))
+names(msig1) <- sub("-", "neg", names(msig1))
+names(msig1) <- paste0("Serrano_",names(msig1))
+names(msig1) <- make.names(names(msig1))
+msig2 <- as.list(readxl::read_excel(paste0(cremwd, "/reference_data/gene_sets/Greenleaf_Paper_Gene_List_selected.xlsx"), sheet=1))
+msig2 <- lapply(msig2, function(x) x[!is.na(x)])
+names(msig2) <- sub("\\+", "pos", names(msig2))
+names(msig2) <- sub("-", "neg", names(msig2))
+names(msig2) <- paste0("Greenleaf_",names(msig2))
+names(msig2) <- make.names(names(msig2))
+
+msig3 <- as.list(readxl::read_excel(paste0(cremwd, "/reference_data/gene_sets/2023_Markers_CSG_Final.xlsx"), sheet=1))
+msig3 <- lapply(msig3, function(x) x[!is.na(x)]) # remove NAs
+names(msig3) <- sub("\\+", "pos", names(msig3))
+names(msig3) <- sub("-", "neg", names(msig3))
+names(msig3) <- make.names(names(msig3))
+
+msig <- c(msig1, msig2, msig3)
+names(msig) <- sub("\\+", "pos", names(msig))
+names(msig) <- sub("-", "neg", names(msig))
+names(msig) <- make.names(names(msig))
+
+msig <- msig[-c(38,40,41,42,43,44,48,85,86,176)]
+if(params$cell.source == "mouse") {
+    msig <- lapply(msig, firstup)
+}
+sc <- AddModuleScore(sc, features = msig, name = names(msig), search = T)
+sc <- AddMetaData(sc, sc[[paste0(names(msig), 1:length(names(msig)))]], col.name = names(msig))
+for(i in paste0(names(msig), 1:length(names(msig)))) {
+  sc[[i]] <- NULL
+}
+```
+
+# Differential expression
+
+Differential expression model: MAST, Finak et al.:
+PMCID: PMC4676162
+https://genomebiology.biomedcentral.com/articles/10.1186/s13059-015-0844-5
+
+For a recent comparison on the performance of different methods for single-cell differential expression, see:  
+https://www.nature.com/articles/nmeth.4612
+
+
+```{r use_seurat, eval=F, fig.height=15}
+
+Idents(sc) <- 'genotype'
+sc.w <- subset(sc, idents = 'WT')
+sc.k <- subset(sc, idents = 'KO')
+
+fmas <- function(sc, res) {
+    Idents(sc) <- res
+    file_out <- paste0(calculations_path, "subset.PC.DEG.genotype.xlsx")
+    seurat.markers <- FindAllMarkers(sc, test.use = "MAST", only.pos = TRUE, verbose = F,recorrect_umi=FALSE)
+    seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% top_n(50, abs(avg_log2FC)))
+    openxlsx::write.xlsx(seurat.markers, file_out, zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F)
+    return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+resDEG <- 'genotype'
+sc.markers.mas.res <- fmas(sc, resDEG)
+
+
+fmas <- function(sc, res) {
+    Idents(sc) <- res
+    file_out <- paste0(calculations_path, "WT.annotation3.xlsx")
+    seurat.markers <- FindAllMarkers(sc, test.use = "MAST", only.pos = TRUE, verbose = F,recorrect_umi=FALSE)
+    seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% top_n(50, abs(avg_log2FC)))
+    openxlsx::write.xlsx(seurat.markers, file_out, zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F)
+    return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+resDEG <- 'annotation3'
+sc.markers.mas.res <- fmas(sc, resDEG)
+```
+#saveRDS(sc.markers.mas.res, paste0(rds_path, "sc.markers.mas.", resDEG, ".Rds"))
+
+Table of top 20 DEG per cluster
+
+The clustering resolution used for differential expression is
+
+```{r, eval=FALSE}
+sc.markers.mas.res[[2]] %>% dplyr::mutate(cluster = cell_spec(
+    cluster, color = "white", bold = T,
+    background = spec_color(as.numeric(factor(cluster)), end = 0.9, direction = -1)
+  )) %>% kable(escape = F, caption=paste0("Top DEG for clusters at ", resDEG )) %>%   kable_styling() %>%   scroll_box(width = "100%", height = "600px")
+```
+
+
+# Heatmap of DEG
+
+Heatmap of top 20 DEG per cluster
+
+The clustering resolution used for differential expression is
+
+
+```{r heatmap_DEG, fig.height=15, eval=FALSE}
+library(readxl)
+seurat.markers <- read_excel(paste0(calculations_path, "/KO.annotation3.xlsx"))
+seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% top_n(50, abs(avg_log2FC)))
+
+
+Idents(sc) <- "annotation3"
+# switch to RNA normalized for heatmap visualization
+DefaultAssay(sc) <- "RNA"
+sc <- NormalizeData(sc)
+all.genes <- rownames(sc)
+sc <- ScaleData(sc, features = all.genes, verbose = F) # default: only scales var.genes, which misses some in heatmap
+g <- DoHeatmap(sc, features = seurat.markers.summary$gene, size=4) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+print(g) # only need to use print if you aren't in a top-level statement (e.g. in a function, in an if/else block, etc.)
+ggsave(paste0(plots_path,"/heatmap.KO.annotation3.pdf"),height = 30,width=12)
+
+
+DefaultAssay(sc) <- "SCT"
+
+```
+
+
+```{r save_object}
+saveRDS(sc_wt, paste0(rds_path, "sc_wt.Rds"))
+```
+
+
+# UMAP of DEG
+
+The clustering resolution used for differential expression is 
+
+
+```{r echo=FALSE, eval=FALSE}
+# 4 columns, 9 width, height per line == 9 / 4 == 2.25
+x <- sc.markers.mas.res[[1]] %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% top_n(4, avg_log2FC) %>% pull(gene)
+len2 <- (length(unique(x))/4)*2.25
+```
+
+```{r feat_DEG_UMAP, eval=FALSE, error = TRUE}
+p <- FeaturePlot(sc, features = unique(x), cols = c("#f0f0f0", brewer.pal(9,"OrRd")) )
+p <- p & ggmin::theme_powerpoint() & NoAxes() & NoLegend()
+p
+ggsave(paste0(plots_path, "UMAP.DEG.pdf"))
+```
