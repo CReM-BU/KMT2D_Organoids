@@ -1,0 +1,162 @@
+---
+title: "Analysis 10X multiome using FigR"
+output:
+  html_document:
+    fig_caption: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: cerulean
+editor_options:
+  chunk_output_type: console
+params:
+#  prefix: "19235RX4"
+  resDEG: "SCT_snn_res.0.25"
+  percent.mito: 15
+  cell.source: "human"
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+library(future)
+#plan("multiprocess", workers = 2)
+options(future.globals.maxSize = 8000 * 1024^2)
+
+ifelse(dir.exists("/mnt/scc/project_workspace/"),
+       cremwd <- "/mnt/scc/",
+       cremwd <- "/restricted/projectnb/crem-bioinfo/")
+master_path <- file.path(cremwd,"/project_workspace/22_05_13_angie/calculation/analysis/day74/ATAC_RNA_WNN_CombinigPeaks_2/")
+prefix <- "CyclingNP_NPC_GCP_KO_combined"
+calculations_path <- paste0(master_path, prefix, "/")
+plots_path <- file.path(calculations_path, "plots/")
+rds_path <- file.path(calculations_path, "rds/")
+cache_path <- file.path(calculations_path, "cache/") # it must end in a slash
+dir.create(rds_path, recursive = T)
+dir.create(plots_path, recursive = T)
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE,error = FALSE,warning = FALSE, cache = TRUE, cache.path = cache_path, fig.width=9,fig.height=7, autodep=TRUE,
+collapse = FALSE, fig.path = plots_path, fig.keep = "all", comment = "##", dev =
+c("png", "pdf"), cache.lazy = FALSE)
+options(tibble.print_max = 150)
+
+library(tidyverse)
+library(Seurat)
+library(Matrix)
+library(matrixStats) #rowVars
+library(magrittr)
+library(dplyr)
+library(RColorBrewer)
+library(kableExtra)
+library(data.table) # getting counts
+library(knitr)
+library(clustree)   # overview of clusters at different resolutions
+library(patchwork)  # method for combining plots
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(ggplot2)
+library(patchwork)
+library(hdf5r)
+#library(GenomicRanges)
+```
+
+The code refers to processing the WT samples. We ran the same code on the KMT2D-LOF samples using the "KO" term, not shown here. 
+```{r load_objects, eval=TRUE}
+sc <- readRDS("/restricted/projectnb/crem-bioinfo///project_workspace/22_05_13_angie/calculation/analysis/day74/ATAC_RNA_WNN_CombinigPeaks_2//rds/sc.Rds")
+```
+
+```{r subset}
+Idents(sc)="genotype"
+sc.wt=subset(sc,ident="WT")
+#Idents(sc.wt)="timepoint"
+#sc.wt=subset(sc.wt,ident="Day51")
+Idents(sc.wt)="anno_coarse"
+sc.wt.npc=subset(sc.wt, ident=c("Neurogenic PC", "Gliogenic PC Early", "Cycling NP", "NPC", "Gliogenic PC Late", "Gliogenic PC", "Astrocytic PC"))
+DimPlot(sc.wt.npc, group.by = "anno_coarse")
+ggsave(paste0(plots_path, "dimplot_anno_coarse.pdf"), height = 9, width = 9)
+```
+
+```{r figR}
+library(chromVAR)
+library(doParallel)
+library(BuenColors)
+library(FigR)
+library(dplyr)
+library(FNN)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+# Convert the ATAC-seq data in Seurat into a SummarizedExperiment object, required for FigR
+peak_counts <- GetAssayData(sc.wt.npc, assay = "ATAC", slot = "counts")
+cell_metadata <- sc.wt.npc[[]]
+peak_annot <- granges(sc.wt.npc[["ATAC"]])
+gr <- GRanges(
+  seqnames = seqnames(peak_annot),
+  ranges = IRanges(
+    start = start(peak_annot),
+    end = end(peak_annot)
+  ),
+  strand = strand(peak_annot)
+)
+rse <- SummarizedExperiment(
+  assays = list(counts = peak_counts),
+  rowRanges = gr,
+  colData = cell_metadata
+)
+
+# Identify cis-regulatory links between accessible peaks and nearby gene expression using permutation testing (with 100 background models)
+cisCorr.wt.npc <- FigR::runGenePeakcorr(ATAC.se = rse,
+                                    RNAmat = sc.wt.npc@assays$SCT@data,
+                                    genome = "hg38", # One of hg19, mm10 or hg38 
+                                    nCores = 8,
+                                    p.cut = NULL, # Set this to NULL and we can filter later
+                                    n_bg = 100)
+
+saveRDS(cisCorr.wt.npc, paste0(rds_path, "cisCorr.sc.wt.npc.Rds"))
+
+cisCorr.filt.wt.npc <- cisCorr.wt.npc %>% dplyr::filter(pvalZ <= 0.05)
+
+# Identify DORC genes with ≥10 significant associated peaks. These genes are potentially regulated by many distal elements
+dorcGenes <- dorcJPlot(dorcTab = cisCorr.filt.wt.npc,
+                       cutoff = 10, # No. sig peaks needed to be called a DORC
+                       labelTop = 20,
+                       returnGeneList = TRUE, # Set this to FALSE for just the plot
+                       force=2)
+
+ggsave(paste0(plots_path, "dorcGenes.sc.wt.npc.pdf"), height = 9, width = 9)
+
+numDorcs <- cisCorr.filt.wt.npc %>% group_by(Gene) %>% tally() %>% arrange(desc(n))
+numDorcs
+write_csv2(numDorcs,file = paste0(rds_path, "dorcGenes.sc.wt.npc.csv"))
+#Visualizing DORCs
+# Compute DORC scores and smooth them across nearest neighbors (KNN), to reduce sparsity/noise
+cellkNN <- get.knn(sc.wt.npc@reductions$pca@cell.embeddings,k = 30)$nn.index
+rownames(cellkNN)=colnames(rse)
+
+dorcMat <- getDORCScores(ATAC.se = rse, # Has to be same SE as used in previous step
+                 dorcTab = cisCorr.filt.wt.npc,
+                 geneList = dorcGenes,
+                 nCores = 4)
+
+# Smooth dorc scores using cell KNNs (k=30)
+dorcMat.s <- smoothScoresNN(NNmat = cellkNN[,1:30],mat = dorcMat,nCores = 8)
+
+# Smooth RNA using cell KNNs for consistency with chromatin
+# This takes longer since it's all genes
+RNAmat.s <- smoothScoresNN(NNmat = cellkNN[,1:30],mat = sc.wt.npc@assays$SCT@data,nCores = 8)
+
+#Infer TF-target regulatory relationships by correlating motif accessibility and gene expression across cells 
+figR.d.wt.npc <- runFigRGRN(ATAC.se = rse, # Must be the same input as used in runGenePeakcorr()
+                     dorcTab = cisCorr.filt.wt.npc, # Filtered peak-gene associations
+                     genome = "hg38",
+                     dorcMat = dorcMat.s,
+                     rnaMat = RNAmat.s, 
+                     nCores = 8)
+
+figR.d.wt.npc %>% 
+  ggplot(aes(Corr.log10P,Enrichment.log10P,color=Score)) + 
+  ggrastr::geom_point_rast(size=0.01,shape=16) + 
+  theme_classic() + 
+  scale_color_gradientn(colours = jdb_palette("solar_extra"),limits=c(-3,3),oob = scales::squish,breaks=scales::breaks_pretty(n=3))
+
+saveRDS(figR.d.wt.npc, paste0(rds_path, "figR.d.sc.wt.npc.Rds"))
+```
