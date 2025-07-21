@@ -8,7 +8,7 @@
 ## Related Publication
 
 **KMT2D-deficiency destabilizes lineage progression in immature neural progenitors**  
-Carly S. Golden<sup>1</sup>, Pushpinder Bawa<sup>1,2</sup>, Feiya Wang<sup>1,2</sup>, Olaf Bodamer<sup>3</sup>, Joseph H. Yost<sup>4</sup>, Maria A. Serrano<sup>1*</sup>  
+Carly S. Golden<sup>1</sup>, Pushpinder Bawa<sup>1,2</sup>, Feiya Wang<sup>1,2</sup>, Olaf Bodamer<sup>3</sup>, H. Joseph  Yost<sup>4</sup>, Maria A. Serrano<sup>1*</sup>  
 <sup>1</sup> Center for Regenerative Medicine, Department of Medicine, Boston University Chobanian & Avedisian School of Medicine, Boston, USA  
 <sup>2</sup> Boston Medical Center, Boston, Massachusetts, USA  
 <sup>3</sup> Department of Pediatrics, Division of Genetics and Genomics, Boston Children’s Hospital  
