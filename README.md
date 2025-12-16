@@ -163,7 +163,7 @@ We thank all contributors for upholding these values and helping create a suppor
 - Li, X., et al. (2023). MultiVelo: Integration of chromatin accessibility and gene expression dynamics at single-cell resolution. *Nat Methods* 20, 1411–1423. [PMCID: PMC10246490]
 - Stuart, T., et al. (2019). Comprehensive Integration of Single-Cell Data. *Cell* 177, 1888–1902.
 - For full protocol details, see in-repo method descriptions and [10x Genomics Documentation](https://www.10xgenomics.com/).
- Additional References can be found in the manuscript: [**KMT2D-deficiency destabilizes lineage progression in immature neural progenitors**](LINK)
+ Additional References can be found in the manuscript: [**KMT2D-deficiency destabilizes lineage progression in immature neural progenitors**](https://www.tandfonline.com/doi/full/10.1080/28361512.2025.2599802)
 
 ## Acknowledgements
 
